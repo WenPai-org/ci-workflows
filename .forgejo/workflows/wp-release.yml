@@ -10,10 +10,20 @@ jobs:
   release:
     runs-on: docker
     container:
-      image: feicode.com/wenpai-org/forgejo-ci-php:latest
+      image: php:8.2-cli-alpine
     steps:
+      - name: Install system dependencies
+        run: |
+          apk add --no-cache git curl zip unzip rsync npm composer python3
+
       - name: Checkout
         uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Install WP-CLI
+        run: |
+          curl -sO https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          chmod +x wp-cli.phar
+          mv wp-cli.phar /usr/local/bin/wp
 
       - name: Install dependencies
         run: |
@@ -27,7 +37,7 @@ jobs:
       - name: Run PHPCS (if configured)
         run: |
           if [ -f phpcs.xml ] || [ -f phpcs.xml.dist ] || [ -f .phpcs.xml ] || [ -f .phpcs.xml.dist ]; then
-            composer lint 2>/dev/null || vendor/bin/phpcs --standard=WordPress . || {
+            composer lint 2>/dev/null || vendor/bin/phpcs . || {
               echo "::error::PHPCS 检查失败，请修复代码规范问题后重新打 tag。"
               exit 1
             }
@@ -37,13 +47,11 @@ jobs:
 
       - name: Generate i18n files
         run: |
-          if command -v wp &>/dev/null; then
-            SLUG=$(basename $GITHUB_REPOSITORY)
-            if [ -d languages ] || [ -d lang ]; then
-              LANG_DIR=$([ -d languages ] && echo languages || echo lang)
-              wp i18n make-pot . "$LANG_DIR/$SLUG.pot" --allow-root 2>/dev/null || true
-              wp i18n make-json "$LANG_DIR/" --no-purge --allow-root 2>/dev/null || true
-            fi
+          SLUG=$(basename $GITHUB_REPOSITORY)
+          if [ -d languages ] || [ -d lang ]; then
+            LANG_DIR=$([ -d languages ] && echo languages || echo lang)
+            wp i18n make-pot . "$LANG_DIR/$SLUG.pot" --allow-root 2>/dev/null || true
+            wp i18n make-json "$LANG_DIR/" --no-purge --allow-root 2>/dev/null || true
           fi
 
       - name: Build release ZIP
@@ -88,4 +96,4 @@ jobs:
             -H "Authorization: token $RELEASE_TOKEN" \
             -F "attachment=@$ZIP_PATH" \
             "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$PLUGIN_SLUG-$TAG_NAME.zip"
-          echo "✅ Release $TAG_NAME 发布成功！"
+          echo "Release $TAG_NAME 发布成功！"
