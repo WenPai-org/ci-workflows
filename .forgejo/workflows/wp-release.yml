@@ -1,0 +1,91 @@
+name: WordPress 插件自动发布
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]+*'
+
+jobs:
+  release:
+    runs-on: docker
+    container:
+      image: feicode.com/wenpai-org/forgejo-ci-php:latest
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          if [ -f composer.json ]; then
+            composer install --no-dev --optimize-autoloader --no-interaction
+          fi
+          if [ -f package.json ]; then
+            npm ci --production 2>/dev/null || true
+          fi
+
+      - name: Run PHPCS (if configured)
+        run: |
+          if [ -f phpcs.xml ] || [ -f phpcs.xml.dist ] || [ -f .phpcs.xml ] || [ -f .phpcs.xml.dist ]; then
+            composer lint 2>/dev/null || vendor/bin/phpcs --standard=WordPress . || {
+              echo "::error::PHPCS 检查失败，请修复代码规范问题后重新打 tag。"
+              exit 1
+            }
+          else
+            echo "未找到 PHPCS 配置，跳过代码规范检查。"
+          fi
+
+      - name: Generate i18n files
+        run: |
+          if command -v wp &>/dev/null; then
+            SLUG=$(basename $GITHUB_REPOSITORY)
+            if [ -d languages ] || [ -d lang ]; then
+              LANG_DIR=$([ -d languages ] && echo languages || echo lang)
+              wp i18n make-pot . "$LANG_DIR/$SLUG.pot" --allow-root 2>/dev/null || true
+              wp i18n make-json "$LANG_DIR/" --no-purge --allow-root 2>/dev/null || true
+            fi
+          fi
+
+      - name: Build release ZIP
+        run: |
+          PLUGIN_SLUG=$(basename $GITHUB_REPOSITORY)
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          mkdir -p /tmp/release
+          rsync -a --exclude='.git' --exclude='.forgejo' --exclude='.github' \
+            --exclude='node_modules' --exclude='.phpcs*' --exclude='phpstan*' \
+            --exclude='tests' --exclude='.editorconfig' --exclude='.gitignore' \
+            --exclude='phpunit*' --exclude='Gruntfile*' --exclude='webpack*' \
+            --exclude='package.json' --exclude='package-lock.json' \
+            --exclude='composer.lock' --exclude='.env*' \
+            . /tmp/release/$PLUGIN_SLUG/
+          cd /tmp/release
+          zip -r /tmp/$PLUGIN_SLUG-$TAG_NAME.zip $PLUGIN_SLUG/
+          echo "ZIP_PATH=/tmp/$PLUGIN_SLUG-$TAG_NAME.zip" >> $GITHUB_ENV
+          echo "PLUGIN_SLUG=$PLUGIN_SLUG" >> $GITHUB_ENV
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+
+      - name: Create Forgejo Release
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          RELEASE_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases" \
+            -d "{
+              \"tag_name\": \"$TAG_NAME\",
+              \"name\": \"$PLUGIN_SLUG $TAG_NAME\",
+              \"body\": \"自动发布 $TAG_NAME\",
+              \"draft\": false,
+              \"prerelease\": false
+            }")
+          RELEASE_ID=$(echo $RELEASE_RESPONSE | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::warning::Release 创建失败或已存在。"
+            exit 0
+          fi
+          curl -s -X POST \
+            -H "Authorization: token $RELEASE_TOKEN" \
+            -F "attachment=@$ZIP_PATH" \
+            "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$PLUGIN_SLUG-$TAG_NAME.zip"
+          echo "✅ Release $TAG_NAME 发布成功！"
