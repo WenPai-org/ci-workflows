@@ -1,0 +1,53 @@
+name: TypeScript/JS 项目 CI
+
+on:
+  push:
+    branches: ['main', 'master']
+  pull_request:
+    branches: ['main', 'master']
+
+jobs:
+  ci:
+    runs-on: linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          # 自动检测包管理器并安装依赖
+          if [ -f pnpm-lock.yaml ]; then
+            npm install -g pnpm 2>/dev/null || true
+            pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          else
+            npm ci
+          fi
+
+      - name: TypeScript 类型检查
+        run: |
+          # 如果有 tsconfig.json 则执行类型检查
+          if [ -f tsconfig.json ]; then
+            npx tsc --noEmit
+          else
+            echo "未找到 tsconfig.json，跳过类型检查"
+          fi
+
+      - name: ESLint 代码规范检查
+        run: |
+          # 如果有 eslint 配置则执行检查
+          if [ -f .eslintrc ] || [ -f .eslintrc.js ] || [ -f .eslintrc.json ] || [ -f .eslintrc.yml ] || [ -f eslint.config.js ] || [ -f eslint.config.mjs ]; then
+            npx eslint .
+          else
+            echo "未找到 ESLint 配置，跳过代码规范检查"
+          fi
+
+      - name: Gitleaks 密钥泄露扫描
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            gitleaks detect --source=. --log-opts="$GITHUB_SHA~1..$GITHUB_SHA" --verbose --exit-code 1
+          else
+            gitleaks detect --source=. --verbose --exit-code 1
+          fi
+          echo "gitleaks 扫描通过"
