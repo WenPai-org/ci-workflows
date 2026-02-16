@@ -56,6 +56,20 @@ Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使�
 - 需要配置 Secrets：`FORGEJO_URL`、`RENOVATE_TOKEN`
 - 各仓库可放置 `renovate.json` 自定义策略（参考 `renovate-default.json`）
 
+### 9. Stale Issue/PR 清理 (`stale-cleanup.yml`)
+- 每周一凌晨 5 点自动运行
+- Issue: 60 天无活动标记 stale，74 天自动关闭
+- PR: 30 天无活动标记 stale，44 天自动关闭
+- 排除 pinned / help-wanted / bug / security 标签
+- 需要配置 Secret：`RELEASE_TOKEN`
+
+### 10. Auto Label (`auto-label.yml`)
+- PR 创建/更新时自动触发
+- 根据文件类型打标签：php / frontend / go / ci/cd / dependencies / documentation / docker / style
+- 根据 PR 变更量打大小标签：size/S / size/M / size/L / size/XL
+- 标签不存在时自动创建（含预设颜色）
+- 需要配置 Secret：`RELEASE_TOKEN`
+
 ## 使用方法
 
 将需要的 `.yml` 文件复制到你的仓库的 `.forgejo/workflows/` 目录下即可。
