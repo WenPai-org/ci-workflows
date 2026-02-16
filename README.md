@@ -39,6 +39,14 @@ Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使�
 - 流程：安装依赖 → PHPCS 检查 → i18n 生成 → 构建 ZIP → 创建 Release
 - 需要在仓库 Settings → Secrets 中配置 `RELEASE_TOKEN`
 
+### 7. 综合安全扫描 (`security-scan.yml`)
+- Push/PR 到 main/master 时自动触发（依赖文件或 Dockerfile 变更）
+- 每周一定时扫描
+- Hadolint Dockerfile 规范检查
+- Composer / npm / Go 依赖安全审计
+- Trivy 容器镜像漏洞扫描
+- 高危漏洞阻断合并
+
 ## 使用方法
 
 将需要的 `.yml` 文件复制到你的仓库的 `.forgejo/workflows/` 目录下即可。
