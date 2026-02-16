@@ -47,6 +47,15 @@ Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使�
 - Trivy 容器镜像漏洞扫描
 - 高危漏洞阻断合并
 
+### 8. Renovate 依赖更新 (`renovate.yml`)
+- 每周一、四凌晨 4 点自动运行
+- 自动发现 WenPai-org 下所有仓库
+- 检测 composer.json / package.json / go.mod 依赖更新
+- patch 更新自动合并，minor/major 需审核
+- 安全漏洞更新优先处理
+- 需要配置 Secrets：`FORGEJO_URL`、`RENOVATE_TOKEN`
+- 各仓库可放置 `renovate.json` 自定义策略（参考 `renovate-default.json`）
+
 ## 使用方法
 
 将需要的 `.yml` 文件复制到你的仓库的 `.forgejo/workflows/` 目录下即可。
