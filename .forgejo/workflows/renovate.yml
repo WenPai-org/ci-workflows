@@ -7,9 +7,7 @@ on:
 
 jobs:
   renovate:
-    runs-on: docker
-    container:
-      image: renovate/renovate:latest
+    runs-on: linux-arm64
     steps:
       - name: Run Renovate
         env:
@@ -19,4 +17,4 @@ jobs:
           RENOVATE_GIT_AUTHOR: "Renovate Bot <renovate@feicode.com>"
           LOG_LEVEL: info
         run: |
-          renovate --autodiscover=true --autodiscover-filter="WenPai-org/*"
+          npx --yes renovate --autodiscover=true --autodiscover-filter="WenPai-org/*"
