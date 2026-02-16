@@ -1,0 +1,47 @@
+name: Go 项目 CI
+
+on:
+  push:
+    branches: ['main', 'master']
+  pull_request:
+    branches: ['main', 'master']
+
+jobs:
+  ci:
+    runs-on: linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Go Vet 静态检查
+        run: |
+          go vet ./...
+
+      - name: golangci-lint 代码规范检查
+        run: |
+          # 如果未安装 golangci-lint 则自动安装
+          if ! command -v golangci-lint &> /dev/null; then
+            go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+            export PATH="$(go env GOPATH)/bin:$PATH"
+          fi
+          # 如果仓库有自定义配置则使用，否则用默认规则
+          if [ -f .golangci.yml ] || [ -f .golangci.yaml ] || [ -f .golangci.toml ]; then
+            golangci-lint run ./...
+          else
+            golangci-lint run --timeout 5m ./...
+          fi
+
+      - name: Go Test 单元测试
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          # 输出覆盖率摘要
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Gitleaks 密钥泄露扫描
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            gitleaks detect --source=. --log-opts="$GITHUB_SHA~1..$GITHUB_SHA" --verbose --exit-code 1
+          else
+            gitleaks detect --source=. --verbose --exit-code 1
+          fi
+          echo "gitleaks 扫描通过"

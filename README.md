@@ -14,7 +14,20 @@ Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使�
 - 支持 `.trivyignore` 文件忽略特定 CVE
 - 每周一定时扫描 + lockfile 变更时触发
 
-### 3. WordPress 插件自动发布 (`wp-release.yml`)
+### 3. WordPress 插件 CI (`wp-plugin-ci.yml`)
+- Push/PR 到 main/master 时自动触发
+- PHP Parallel Lint 语法检查
+- PHPCS 代码规范检查（支持自定义配置）
+- Gitleaks 密钥泄露扫描
+
+### 4. Go 项目 CI (`go-ci.yml`)
+- Push/PR 到 main/master 时自动触发
+- `go vet` 静态检查
+- `golangci-lint` 代码规范检查（支持自定义配置，未安装时自动安装）
+- `go test -race` 单元测试 + 覆盖率
+- Gitleaks 密钥泄露扫描
+
+### 5. WordPress 插件自动发布 (`wp-release.yml`)
 - 打 tag 时自动触发：`v*` 或 `x.y.z` 格式
 - 流程：安装依赖 → PHPCS 检查 → i18n 生成 → 构建 ZIP → 创建 Release
 - 需要在仓库 Settings → Secrets 中配置 `RELEASE_TOKEN`
