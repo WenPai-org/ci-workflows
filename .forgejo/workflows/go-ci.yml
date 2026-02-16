@@ -8,6 +8,7 @@ on:
 
 jobs:
   ci:
+    if: github.repository != 'WenPai-org/ci-workflows'
     runs-on: linux-arm64
     steps:
       - name: Checkout
