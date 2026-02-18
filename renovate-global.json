@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "platform": "forgejo",
+  "endpoint": "https://feicode.com/api/v1/",
+  "autodiscover": true,
+  "autodiscoverFilter": ["WenPai-org/*", "Windfonts/*", "feibisi/*"],
+  "onboardingConfig": {
+    "extends": ["local>WenPai-org/ci-workflows:renovate-default"]
+  },
+  "fetchChangeLogs": "off",
+  "allowedCommands": [],
+  "repositoryCache": "enabled"
+}
