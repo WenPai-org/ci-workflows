@@ -7,113 +7,142 @@ on:
 
 jobs:
   stale-cleanup:
-    if: github.repository != 'WenPai-org/ci-workflows'
     runs-on: linux-arm64
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: 清理过期 Issue 和 PR
+      - name: 清理所有原创仓库的过期 Issue 和 PR
         env:
-          FORGEJO_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
-          API_BASE="${GITHUB_SERVER_URL:-https://feicode.com}/api/v1"
-          OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
+          set -euo pipefail
+          API_BASE="https://feicode.com/api/v1"
           NOW=$(date +%s)
 
-          # 受保护的标签，带这些标签的不处理
+          # 受保护标签
           PROTECTED_LABELS="pinned|help-wanted|bug|security|wontfix"
 
-          # Issue: 60 天无活动标记 stale，再过 14 天关闭
-          STALE_DAYS=60
-          CLOSE_DAYS=74
-          # PR: 30 天无活动标记 stale，再过 14 天关闭
+          # 阈值
+          ISSUE_STALE_DAYS=60
+          ISSUE_CLOSE_DAYS=74
           PR_STALE_DAYS=30
           PR_CLOSE_DAYS=44
 
-          process_items() {
-            local TYPE=$1  # issues 或 pulls
-            local STALE=$2
-            local CLOSE=$3
+          # 获取所有原创仓库
+          REPOS=$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
+            "$API_BASE/repos/search?limit=50&sort=updated&order=desc" | \
+            python3 -c "
+          import json, sys
+          repos = json.load(sys.stdin).get('data', [])
+          for r in repos:
+              if not r.get('mirror') and not r.get('fork') and not r.get('archived'):
+                  print(r['full_name'])
+          ")
 
-            PAGE=1
-            while true; do
+          ensure_stale_label() {
+            local FULL_NAME=$1
+            # 检查 stale 标签是否存在，不存在则创建
+            local LABEL_ID=$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
+              "$API_BASE/repos/$FULL_NAME/labels?limit=50" | \
+              python3 -c "
+          import json, sys
+          labels = json.load(sys.stdin)
+          for l in labels:
+              if l['name'] == 'stale':
+                  print(l['id'])
+                  break
+          " 2>/dev/null)
+
+            if [ -z "$LABEL_ID" ]; then
+              LABEL_ID=$(curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"name":"stale","color":"#ededed","description":"长期无活动"}' \
+                "$API_BASE/repos/$FULL_NAME/labels" | \
+                python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+              [ -n "$LABEL_ID" ] && echo "  创建 stale 标签: ID=$LABEL_ID"
+            fi
+            echo "$LABEL_ID"
+          }
+
+          process_repo() {
+            local FULL_NAME=$1
+            local STALE_LABEL_ID=$(ensure_stale_label "$FULL_NAME")
+
+            for TYPE in issues pulls; do
               if [ "$TYPE" = "issues" ]; then
-                ITEMS=$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
-                  "$API_BASE/repos/$OWNER/$REPO/issues?state=open&type=issues&page=$PAGE&limit=50")
+                STALE_SECS=$((ISSUE_STALE_DAYS * 86400))
+                CLOSE_SECS=$((ISSUE_CLOSE_DAYS * 86400))
+                STALE_DAYS=$ISSUE_STALE_DAYS
               else
-                ITEMS=$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
-                  "$API_BASE/repos/$OWNER/$REPO/issues?state=open&type=pulls&page=$PAGE&limit=50")
+                STALE_SECS=$((PR_STALE_DAYS * 86400))
+                CLOSE_SECS=$((PR_CLOSE_DAYS * 86400))
+                STALE_DAYS=$PR_STALE_DAYS
               fi
 
-              COUNT=$(echo "$ITEMS" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
-              [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && break
+              PAGE=1
+              while true; do
+                ITEMS=$(curl -s -H "Authorization: token $FORGEJO_TOKEN" \
+                  "$API_BASE/repos/$FULL_NAME/issues?state=open&type=$TYPE&page=$PAGE&limit=50")
 
-              echo "$ITEMS" | python3 -c "
-          import json, sys, time
+                ACTIONS=$(echo "$ITEMS" | python3 -c "
+          import json, sys
+          from datetime import datetime, timezone
 
           items = json.load(sys.stdin)
+          if not items:
+              sys.exit(0)
+
           now = $NOW
-          stale_seconds = $STALE * 86400
-          close_seconds = $CLOSE * 86400
           protected = set('$PROTECTED_LABELS'.split('|'))
 
           for item in items:
-              number = item['number']
-              title = item['title']
               labels = [l['name'] for l in item.get('labels', [])]
-
-              # 跳过受保护标签
               if protected & set(labels):
                   continue
+              dt = datetime.fromisoformat(item['updated_at'].replace('Z', '+00:00'))
+              age = now - int(dt.timestamp())
+              if age > $CLOSE_SECS:
+                  print(f'CLOSE|{item[\"number\"]}|{item[\"title\"][:60]}')
+              elif age > $STALE_SECS and 'stale' not in labels:
+                  print(f'STALE|{item[\"number\"]}|{item[\"title\"][:60]}')
+          " 2>/dev/null)
 
-              updated = item['updated_at']
-              # 解析 ISO 时间
-              from datetime import datetime, timezone
-              dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
-              updated_ts = int(dt.timestamp())
-              age = now - updated_ts
+                [ -z "$ACTIONS" ] && break
 
-              if age > close_seconds:
-                  print(f'CLOSE|{number}|{title}')
-              elif age > stale_seconds and 'stale' not in labels:
-                  print(f'STALE|{number}|{title}')
-          " | while IFS='|' read -r ACTION NUMBER TITLE; do
-                if [ "$ACTION" = "STALE" ]; then
-                  echo "标记 #$NUMBER 为 stale: $TITLE"
-                  # 添加 stale 标签
-                  curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
-                    "$API_BASE/repos/$OWNER/$REPO/issues/$NUMBER/labels" \
-                    -H "Content-Type: application/json" \
-                    -d '{"labels":["stale"]}' > /dev/null
-                  # 添加评论
-                  curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
-                    "$API_BASE/repos/$OWNER/$REPO/issues/$NUMBER/comments" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"body\":\"此 ${TYPE%s} 已超过 $STALE 天无活动，已标记为 stale。如果 14 天内无新活动将自动关闭。\"}" > /dev/null
-                elif [ "$ACTION" = "CLOSE" ]; then
-                  echo "关闭 #$NUMBER: $TITLE"
-                  curl -s -X PATCH -H "Authorization: token $FORGEJO_TOKEN" \
-                    "$API_BASE/repos/$OWNER/$REPO/issues/$NUMBER" \
-                    -H "Content-Type: application/json" \
-                    -d '{"state":"closed"}' > /dev/null
-                  curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
-                    "$API_BASE/repos/$OWNER/$REPO/issues/$NUMBER/comments" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"body\":\"此 ${TYPE%s} 因长期无活动已自动关闭。如需继续讨论请重新打开。\"}" > /dev/null
-                fi
+                echo "$ACTIONS" | while IFS='|' read -r ACTION NUMBER TITLE; do
+                  [ -z "$ACTION" ] && continue
+                  if [ "$ACTION" = "STALE" ] && [ -n "$STALE_LABEL_ID" ]; then
+                    echo "  标记 $FULL_NAME#$NUMBER 为 stale: $TITLE"
+                    curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "{\"labels\":[$STALE_LABEL_ID]}" \
+                      "$API_BASE/repos/$FULL_NAME/issues/$NUMBER/labels" > /dev/null
+                    curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "{\"body\":\"此 ${TYPE%s} 已超过 ${STALE_DAYS} 天无活动，已标记为 stale。如果 14 天内无新活动将自动关闭。\"}" \
+                      "$API_BASE/repos/$FULL_NAME/issues/$NUMBER/comments" > /dev/null
+                  elif [ "$ACTION" = "CLOSE" ]; then
+                    echo "  关闭 $FULL_NAME#$NUMBER: $TITLE"
+                    curl -s -X PATCH -H "Authorization: token $FORGEJO_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d '{"state":"closed"}' \
+                      "$API_BASE/repos/$FULL_NAME/issues/$NUMBER" > /dev/null
+                    curl -s -X POST -H "Authorization: token $FORGEJO_TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "{\"body\":\"此 ${TYPE%s} 因长期无活动已自动关闭。如需继续讨论请重新打开。\"}" \
+                      "$API_BASE/repos/$FULL_NAME/issues/$NUMBER/comments" > /dev/null
+                  fi
+                done
+
+                PAGE=$((PAGE + 1))
+                # 如果返回不足 50 条说明是最后一页
+                ITEM_COUNT=$(echo "$ITEMS" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null)
+                [ "$ITEM_COUNT" -lt 50 ] 2>/dev/null && break
               done
-
-              PAGE=$((PAGE + 1))
             done
           }
 
-          echo "=== 处理 Issues (${STALE_DAYS}天stale / ${CLOSE_DAYS}天关闭) ==="
-          process_items "issues" $STALE_DAYS $CLOSE_DAYS
-
-          echo "=== 处理 PRs (${PR_STALE_DAYS}天stale / ${PR_CLOSE_DAYS}天关闭) ==="
-          process_items "pulls" $PR_STALE_DAYS $PR_CLOSE_DAYS
-
-          echo "清理完成"
+          echo "=== Stale 清理开始 ==="
+          for REPO in $REPOS; do
+            echo "处理 $REPO ..."
+            process_repo "$REPO"
+          done
+          echo "=== 清理完成 ==="
