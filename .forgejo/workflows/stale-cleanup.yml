@@ -13,7 +13,6 @@ jobs:
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
         run: |
-          set -euo pipefail
           API_BASE="https://feicode.com/api/v1"
           NOW=$(date +%s)
 
