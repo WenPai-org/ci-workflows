@@ -35,8 +35,14 @@ Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使�
 - Gitleaks 密钥泄露扫描
 
 ### 6. WordPress 插件自动发布 (`wp-release.yml`)
-- 打 tag 时自动触发：`v*` 或 `x.y.z` 格式
-- 流程：安装依赖 → PHPCS 检查 → i18n 生成 → 构建 ZIP → 创建 Release
+- 打 tag 时自动触发：`v*` 格式
+- 版本一致性校验（tag vs 插件头 vs readme.txt Stable tag）
+- PHP lint 语法检查
+- ZIP 构建 + SHA-256 校验和
+- 智能 Release 创建/更新 + 资产上传（带重试和验证）
+- 可选：部署后 composer repair（需配置 `DEPLOY_*` secrets）
+- 可选：更新 API 元数据验证（需配置 `UPDATE_API_BASE`）
+- 可选：失败时通知 AI CI 助手（需配置 `AI_WEBHOOK_ENDPOINT`）
 - 需要在仓库 Settings → Secrets 中配置 `RELEASE_TOKEN`
 
 ### 7. 综合安全扫描 (`security-scan.yml`)
