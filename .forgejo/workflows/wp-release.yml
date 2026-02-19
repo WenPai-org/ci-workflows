@@ -316,6 +316,52 @@ jobs:
           echo ">>> Release ${TAG} published successfully"
           echo "Release URL: ${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
+      - name: Push ZIP to staging for QA verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGING_DIR="/mnt/shared-context/staging/elementary"
+          SLUG="${{ env.PLUGIN_SLUG }}"
+          ZIP_PATH="${{ steps.build.outputs.zip_path }}"
+          ZIP_NAME="${{ steps.build.outputs.zip_name }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if [ ! -d "$STAGING_DIR" ]; then
+            echo "Staging dir not available (NAS not mounted?), skipping"
+            exit 0
+          fi
+
+          cp "$ZIP_PATH" "$STAGING_DIR/${SLUG}.zip"
+
+          # Write metadata for elementary
+          cat > "$STAGING_DIR/${SLUG}.meta.json" <<METAEOF
+          {
+            "plugin": "$SLUG",
+            "version": "$VERSION",
+            "tag": "${{ steps.version.outputs.tag }}",
+            "sha256": "${{ steps.checksum.outputs.sha256 }}",
+            "repo": "${{ github.repository }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          METAEOF
+
+          # Notify elementary via inbox
+          INBOX="/mnt/shared-context/inbox/elementary"
+          mkdir -p "$INBOX"
+          cat > "$INBOX/$(date +%Y-%m-%d-%H%M)-ci-release-${SLUG}.md" <<MSGEOF
+          **来自**: CI (fedora-devops)
+          **主题**: ${SLUG} ${VERSION} 已发布，请验收
+
+          Release 构建完成，zip 已推送到 staging：
+          - 文件: staging/elementary/${SLUG}.zip
+          - 版本: ${VERSION}
+          - SHA256: ${{ steps.checksum.outputs.sha256 }}
+
+          **期望**: 运行 \`just test-plugin ${SLUG}\`，验收结果写入 staging/fedora-devops/test-results/
+          MSGEOF
+
+          echo "ZIP pushed to staging, elementary notified"
+
       - name: Run post-release composer repair on target site (optional)
         if: ${{ secrets.DEPLOY_HOST != '' && secrets.DEPLOY_SSH_KEY != '' }}
         shell: bash
