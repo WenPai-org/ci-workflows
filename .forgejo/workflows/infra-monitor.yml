@@ -1,0 +1,16 @@
+name: 基础设施监控
+on:
+  schedule:
+    - cron: '0 8 * * *'  # 每天 08:00
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 运行基础设施检查
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+        run: python3 scripts/infra-monitor.py
