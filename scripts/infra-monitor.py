@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""feiCode 基础设施监控脚本
+"""基础设施监控脚本
 
 检查项：
 - Forgejo 服务健康
 - Forgejo Runner 状态
-- VPS 磁盘空间
+- VPS 磁盘空间（全部生产服务器）
 - 备份新鲜度
 - 镜像同步状态
 - NAS 可达性
+- 生产网站真实可用性（内容校验，非仅状态码）
+- SSL 证书到期预警
+- Docker 容器健康
+- WordPress 安全检查
 
 告警渠道：
 - 共享上下文 /mnt/shared-context/alerts/
@@ -17,6 +21,9 @@
 
 import json
 import os
+import re
+import ssl
+import socket
 import subprocess
 import sys
 import urllib.request
@@ -31,9 +38,10 @@ ALERT_DIR = Path("/mnt/shared-context/alerts")
 ALERT_REPO = "WenPai-org/ci-workflows"
 
 # 阈值
-VPS_DISK_WARN_PCT = 80
+DISK_WARN_PCT = 80
 BACKUP_MAX_AGE_HOURS = 30
 MIRROR_STALE_DAYS = 3
+SSL_WARN_DAYS = 14
 
 
 class Check:
@@ -77,6 +85,54 @@ def run_cmd(cmd, timeout=10):
         return -1, str(e)
 
 
+# === 生产服务器配置 ===
+
+PROD_SERVERS = {
+    "weixiaoduo-prod": {
+        "host": "weixiaoduo-prod",
+        "sites": [
+            {"url": "https://www.weixiaoduo.com", "expect": "weixiaoduo", "name": "薇晓朵主站"},
+            {"url": "https://www.feibisi.com", "expect": "feibisi", "name": "飞比斯"},
+            {"url": "https://tongji.feibisi.com", "expect": "matomo", "name": "Matomo统计"},
+        ],
+        "containers": ["matomo-app", "matomo-mysql", "postgresql_an4p-postgresql_an4p-1"],
+        "disks": ["/", "/www"],
+    },
+    "feicode-prod": {
+        "host": "feicode-prod",
+        "sites": [
+            {"url": "https://feicode.com", "expect": "feicode", "name": "feiCode"},
+        ],
+        "containers": ["forgejo_FeiCode-1", "wenpai-bridge", "forgejo-runner-01"],
+        "disks": ["/"],
+    },
+    "wptea-prod": {
+        "host": "wptea-prod",
+        "sites": [
+            {"url": "https://wptea.com", "expect": "wptea", "name": "WP茶馆"},
+        ],
+        "containers": [],
+        "disks": ["/"],
+    },
+    "cravatar-prod": {
+        "host": "cravatar-prod",
+        "sites": [
+            {"url": "https://cravatar.com", "expect": "cravatar", "name": "Cravatar"},
+            {"url": "https://cn.cravatar.com", "expect": "cravatar", "name": "Cravatar CN"},
+        ],
+        "containers": [],
+        "disks": ["/"],
+    },
+}
+
+# SSL 证书检查列表（关键域名）
+SSL_DOMAINS = [
+    "www.weixiaoduo.com", "www.feibisi.com", "tongji.feibisi.com",
+    "feicode.com", "wptea.com",
+    "cravatar.com", "cn.cravatar.com",
+]
+
+
 # === 检查函数 ===
 
 def check_forgejo_health():
@@ -97,21 +153,31 @@ def check_runner():
     return c.fail(f"Runner 状态: {out}")
 
 
-def check_vps_disk():
-    """检查 VPS 磁盘空间"""
-    c = Check("VPS 磁盘")
-    code, out = run_cmd("ssh -o ConnectTimeout=5 myserver 'df -h / | tail -1'", timeout=15)
-    if code != 0:
-        return c.fail("无法连接 VPS", out)
-    parts = out.split()
-    if len(parts) >= 5:
-        usage_pct = int(parts[4].rstrip("%"))
-        total = parts[1]
-        used = parts[2]
-        if usage_pct >= VPS_DISK_WARN_PCT:
-            return c.fail(f"磁盘使用 {usage_pct}% ({used}/{total})")
-        return c.success(f"{usage_pct}% ({used}/{total})")
-    return c.fail("无法解析磁盘信息", out)
+def check_disk(server_name, server_cfg):
+    """检查服务器磁盘空间"""
+    c = Check(f"磁盘 {server_name}")
+    host = server_cfg["host"]
+    problems = []
+    details = []
+
+    for mount in server_cfg["disks"]:
+        code, out = run_cmd(
+            f"ssh -o ConnectTimeout=5 {host} 'df -h {mount} | tail -1'", timeout=15
+        )
+        if code != 0:
+            problems.append(f"{mount}: 无法检查")
+            continue
+        parts = out.split()
+        if len(parts) >= 5:
+            usage_pct = int(parts[4].rstrip("%"))
+            if usage_pct >= DISK_WARN_PCT:
+                problems.append(f"{mount} {usage_pct}% ({parts[2]}/{parts[1]})")
+            else:
+                details.append(f"{mount} {usage_pct}%")
+
+    if problems:
+        return c.fail("; ".join(problems), "\n".join(details))
+    return c.success("; ".join(details))
 
 
 def check_backup():
@@ -180,6 +246,129 @@ def check_nas():
     return c.success("可达")
 
 
+def check_website(site_cfg):
+    """检查网站真实可用性（不只是状态码）"""
+    c = Check(f"网站 {site_cfg['name']}")
+    url = site_cfg["url"]
+    expect = site_cfg["expect"].lower()
+
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "InfraMonitor/1.0",
+            "Accept": "text/html",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.status
+            body = resp.read(50000).decode("utf-8", errors="replace").lower()
+
+            # 检查 HTTP 状态码
+            if status >= 500:
+                return c.fail(f"HTTP {status}", url)
+
+            # 检查页面是否包含预期内容
+            if expect not in body:
+                return c.fail(f"页面无预期内容 '{site_cfg['expect']}'", f"HTTP {status}, {url}")
+
+            # 检查常见错误标志
+            error_patterns = [
+                ("fatal error", "PHP Fatal Error"),
+                ("database connection", "数据库连接失败"),
+                ("error establishing", "数据库连接失败"),
+                ("502 bad gateway", "502 网关错误"),
+                ("503 service", "503 服务不可用"),
+                ("maintenance mode", "维护模式"),
+                ("parse error", "PHP Parse Error"),
+                ("warning:</b>", "PHP Warning"),
+            ]
+            for pattern, desc in error_patterns:
+                if pattern in body:
+                    return c.fail(f"页面包含错误: {desc}", url)
+
+            return c.success(f"HTTP {status}")
+
+    except urllib.error.HTTPError as e:
+        return c.fail(f"HTTP {e.code}", url)
+    except urllib.error.URLError as e:
+        return c.fail(f"连接失败: {e.reason}", url)
+    except Exception as e:
+        return c.fail(f"异常: {str(e)[:80]}", url)
+
+
+def check_ssl_cert(domain):
+    """检查 SSL 证书到期时间"""
+    c = Check(f"SSL {domain}")
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((domain, 443), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+                expire_str = cert["notAfter"]  # 'Nov 12 13:35:49 2026 GMT'
+                expire_date = datetime.strptime(expire_str, "%b %d %H:%M:%S %Y %Z")
+                days_left = (expire_date - datetime.now()).days
+
+                if days_left < 0:
+                    return c.fail(f"已过期 {abs(days_left)} 天")
+                if days_left < SSL_WARN_DAYS:
+                    return c.fail(f"{days_left} 天后过期 ({expire_date.strftime('%Y-%m-%d')})")
+                return c.success(f"{days_left} 天 ({expire_date.strftime('%Y-%m-%d')})")
+    except ssl.SSLCertVerificationError as e:
+        return c.fail(f"证书验证失败: {str(e)[:60]}")
+    except Exception as e:
+        return c.fail(f"检查失败: {str(e)[:60]}")
+
+
+def check_containers(server_name, server_cfg):
+    """检查 Docker 容器运行状态"""
+    c = Check(f"容器 {server_name}")
+    host = server_cfg["host"]
+    expected = server_cfg["containers"]
+
+    if not expected:
+        return c.success("无容器配置，跳过")
+
+    code, out = run_cmd(
+        f"ssh -o ConnectTimeout=5 {host} 'docker ps --format \"{{{{.Names}}}}:{{{{.Status}}}}\"'",
+        timeout=15,
+    )
+    if code != 0:
+        return c.fail("无法检查容器状态", out)
+
+    running = {}
+    for line in out.strip().split("\n"):
+        if ":" in line:
+            name, status = line.split(":", 1)
+            running[name] = status
+
+    down = [name for name in expected if name not in running]
+    if down:
+        return c.fail(f"容器未运行: {', '.join(down)}")
+    return c.success(f"{len(expected)} 个容器正常")
+
+
+def check_wp_security():
+    """检查 WordPress 安全指标（webshell 快速扫描）"""
+    c = Check("WP 安全")
+    # 检查上传目录是否有可疑 PHP 文件（排除 index.php 和已知插件目录）
+    code, out = run_cmd(
+        "ssh -o ConnectTimeout=5 weixiaoduo-prod "
+        "'find /www/wwwroot/www.weixiaoduo.com/wp-content/uploads/ "
+        "-name \"*.php\" ! -name \"index.php\" "
+        "! -path \"*/wpallimport/*\" ! -path \"*/cravatar/*\" ! -path \"*/learndash/*\" "
+        "-type f 2>/dev/null | head -5'",
+        timeout=20,
+    )
+    if code != 0:
+        return c.fail("无法扫描", out)
+
+    if out.strip():
+        files = out.strip().split("\n")
+        return c.fail(
+            f"上传目录发现 {len(files)} 个可疑 PHP 文件",
+            "\n".join(files[:5]),
+        )
+    return c.success("上传目录无可疑 PHP 文件")
+
+
 # === 告警输出 ===
 
 def write_alert(checks):
@@ -236,17 +425,44 @@ def create_alert_issue(checks):
 
 
 def main():
-    print(f"=== feiCode 基础设施监控 {datetime.now().strftime('%Y-%m-%d %H:%M')} ===\n")
+    print(f"=== 基础设施监控 {datetime.now().strftime('%Y-%m-%d %H:%M')} ===\n")
 
-    checks = [
-        check_forgejo_health(),
-        check_runner(),
-        check_vps_disk(),
-        check_backup(),
-        check_mirror_sync(),
-        check_nas(),
-    ]
+    checks = []
 
+    # --- feiCode 平台 ---
+    print("  [feiCode 平台]")
+    checks.append(check_forgejo_health())
+    checks.append(check_runner())
+    checks.append(check_backup())
+    checks.append(check_mirror_sync())
+    checks.append(check_nas())
+
+    # --- 生产服务器磁盘 ---
+    print("  [生产服务器]")
+    for name, cfg in PROD_SERVERS.items():
+        checks.append(check_disk(name, cfg))
+
+    # --- Docker 容器 ---
+    for name, cfg in PROD_SERVERS.items():
+        checks.append(check_containers(name, cfg))
+
+    # --- 网站可用性 ---
+    print("  [网站可用性]")
+    for cfg in PROD_SERVERS.values():
+        for site in cfg["sites"]:
+            checks.append(check_website(site))
+
+    # --- SSL 证书 ---
+    print("  [SSL 证书]")
+    for domain in SSL_DOMAINS:
+        checks.append(check_ssl_cert(domain))
+
+    # --- WordPress 安全 ---
+    print("  [安全检查]")
+    checks.append(check_wp_security())
+
+    # --- 输出结果 ---
+    print()
     for c in checks:
         icon = "✅" if c.ok else "❌"
         print(f"  {icon} {c.name}: {c.message}")
