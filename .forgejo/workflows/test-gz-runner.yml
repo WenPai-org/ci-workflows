@@ -1,0 +1,30 @@
+name: Test GZ-1P Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    runs-on: gz-debian
+    steps:
+      - name: System info
+        run: |
+          echo "=== Runner Test ==="
+          echo "Hostname: $(hostname)"
+          echo "OS: $(cat /etc/os-release | grep PRETTY_NAME)"
+          echo "Arch: $(uname -m)"
+          echo "Memory: $(free -h | grep Mem)"
+          echo "Disk: $(df -h / | tail -1)"
+      - name: Network test
+        run: |
+          echo "=== Network ==="
+          curl -sf -o /dev/null -w "feiCode: %{http_code} %{time_total}s\n" --max-time 10 https://feicode.com
+          curl -sf -o /dev/null -w "PyPI: %{http_code} %{time_total}s\n" --max-time 10 https://pypi.org
+          curl -sf -o /dev/null -w "npm: %{http_code} %{time_total}s\n" --max-time 10 https://registry.npmjs.org
+      - name: Tools check
+        run: |
+          echo "=== Tools ==="
+          git --version
+          podman --version || echo "podman: not available"
+          python3 --version
+          curl --version | head -1
