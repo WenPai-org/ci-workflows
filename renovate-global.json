@@ -9,5 +9,6 @@
   },
   "fetchChangeLogs": "off",
   "allowedCommands": [],
-  "repositoryCache": "enabled"
+  "repositoryCache": "enabled",
+  "suppressNotifications": ["prCreation", "prEditedNotification", "lockFileErrors", "onboardingClose"]
 }
