@@ -29,6 +29,8 @@ FeiCode（`https://feicode.com`）统一 Forgejo Actions CI/CD 共享工作流�
 
 ## 三、复制即用示例（10 行接入）
 
+> **重要**：FeiCode 同实例调用 `workflow_call` 必须使用短路径 `WenPai-org/ci-workflows/.forgejo/workflows/reusable-*.yml@main`（**不要**加 `https://feicode.com/` 前缀），Forgejo 服务端才会自动展开子 Job 并正确匹配 `runs-on` 标签。
+
 ### 1. 密钥泄露扫描（所有仓库必接）
 
 ```yaml
@@ -41,7 +43,7 @@ on:
 
 jobs:
   gitleaks:
-    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-gitleaks.yml@main
+    uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-gitleaks.yml@main
 ```
 
 ### 2. WordPress 插件 CI
@@ -56,7 +58,7 @@ on:
 
 jobs:
   ci:
-    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
+    uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
     with:
       runs_on: php-8.3
       test_command: "php tests/php/run.php"
@@ -74,7 +76,7 @@ on:
 
 jobs:
   release:
-    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-release.yml@main
+    uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-release.yml@main
     with:
       test_command: "php tests/php/run.php"
       publish_package: true
@@ -99,7 +101,7 @@ on:
 
 jobs:
   go:
-    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
+    uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
     with:
       runs_on: go-1.24
       test_flags: "-race ./..."
@@ -119,7 +121,7 @@ on:
 
 jobs:
   oci:
-    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
+    uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
     with:
       dockerfile: Dockerfile
       context: .

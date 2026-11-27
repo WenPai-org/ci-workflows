@@ -2,7 +2,7 @@
 # 调用示例：
 #   jobs:
 #     wp-ci:
-#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
+#       uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
 #       with:
 #         test_command: "php tests/php/run.php"
 #         admin_lint: true
@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: "php-8.3"
+      server_url:
+        description: "FeiCode 服务器地址（默认 https://feicode.com，避免容器内网主机名无法解析）"
+        required: false
+        type: string
+        default: "https://feicode.com"
       working_directory:
         description: "插件根目录相对路径（默认仓库根目录 .）"
         required: false
@@ -58,6 +63,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          github-server-url: ${{ inputs.server_url }}
 
       - name: Print PHP runtime
         run: |
