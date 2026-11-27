@@ -2,7 +2,7 @@
 # 调用示例：
 #   jobs:
 #     go-ci:
-#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
+#       uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
 #       with:
 #         build_cmd: "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/app ./cmd/app"
 name: Reusable Go CI
@@ -15,6 +15,11 @@ on:
         required: false
         type: string
         default: "go-1.24"
+      server_url:
+        description: "FeiCode 服务器地址（默认 https://feicode.com，避免容器内网主机名无法解析）"
+        required: false
+        type: string
+        default: "https://feicode.com"
       working_directory:
         description: "Go 模块所在目录（默认仓库根目录 .）"
         required: false
@@ -54,6 +59,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          github-server-url: ${{ inputs.server_url }}
 
       - name: Cache Go modules
         if: ${{ inputs.enable_cache }}

@@ -3,7 +3,7 @@
 # 调用示例：
 #   jobs:
 #     docker:
-#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
+#       uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
 #       with:
 #         dockerfile: Dockerfile
 #       secrets:
@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: "ubuntu-latest"
+      server_url:
+        description: "FeiCode 服务器地址（默认 https://feicode.com，避免容器内网主机名无法解析）"
+        required: false
+        type: string
+        default: "https://feicode.com"
       registry:
         description: "OCI 镜像仓库域名（默认 feicode.com）"
         required: false
@@ -83,6 +88,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          github-server-url: ${{ inputs.server_url }}
 
       - name: Resolve OCI image metadata
         id: meta

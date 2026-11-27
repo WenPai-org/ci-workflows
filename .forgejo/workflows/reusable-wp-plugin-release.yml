@@ -11,6 +11,11 @@ on:
         required: false
         type: string
         default: "php-8.3"
+      server_url:
+        description: "FeiCode 服务器地址（默认 https://feicode.com，避免容器内网主机名无法解析）"
+        required: false
+        type: string
+        default: "https://feicode.com"
       plugin_slug:
         description: "插件目录/包名 slug（默认取仓库名）"
         required: false
@@ -107,6 +112,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          github-server-url: ${{ inputs.server_url }}
 
       - name: Resolve release metadata
         id: meta
@@ -319,6 +325,7 @@ jobs:
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           FALLBACK_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ inputs.server_url }}
           TAG: ${{ steps.meta.outputs.tag }}
           SLUG: ${{ steps.meta.outputs.slug }}
           PRERELEASE: ${{ steps.meta.outputs.prerelease }}
@@ -333,7 +340,8 @@ jobs:
             exit 1
           fi
 
-          API_URL="${GITHUB_SERVER_URL%/}/api/v1/repos/${GITHUB_REPOSITORY}"
+          BASE_URL="${SERVER_URL%/}"
+          API_URL="${BASE_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
           AUTH_HEADER="Authorization: token ${AUTH_TOKEN}"
 
           {
@@ -393,7 +401,7 @@ jobs:
               "${API_URL}/releases/${RELEASE_ID}/assets?name=${ENC}" >/dev/null
           done
 
-          RELEASE_URL="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          RELEASE_URL="${BASE_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
           echo "release_url=${RELEASE_URL}" >> "${GITHUB_OUTPUT}"
           echo ">>> Published Release: ${RELEASE_URL}"
 
@@ -404,6 +412,7 @@ jobs:
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           FALLBACK_TOKEN: ${{ github.token }}
+          SERVER_URL: ${{ inputs.server_url }}
           OWNER: ${{ steps.meta.outputs.owner }}
           SLUG: ${{ steps.meta.outputs.slug }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -412,7 +421,7 @@ jobs:
         run: |
           set -euo pipefail
           AUTH_TOKEN="${RELEASE_TOKEN:-${FALLBACK_TOKEN:-}}"
-          BASE="${GITHUB_SERVER_URL%/}/api/packages/${OWNER}/generic/${SLUG}/${VERSION}"
+          BASE="${SERVER_URL%/}/api/packages/${OWNER}/generic/${SLUG}/${VERSION}"
 
           for FILENAME in "${ZIP_NAME}" "${ZIP_NAME}.sha256"; do
             FILE="${RELEASE_DIR}/${FILENAME}"

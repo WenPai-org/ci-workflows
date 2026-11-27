@@ -2,7 +2,7 @@
 # 调用示例：
 #   jobs:
 #     secrets-scan:
-#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-gitleaks.yml@main
+#       uses: WenPai-org/ci-workflows/.forgejo/workflows/reusable-gitleaks.yml@main
 name: Reusable Gitleaks Scan
 
 on:
@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: "ubuntu-latest"
+      server_url:
+        description: "FeiCode 服务器地址（默认 https://feicode.com，避免容器内网主机名无法解析）"
+        required: false
+        type: string
+        default: "https://feicode.com"
       fetch_depth:
         description: "Git 检出深度（0 表示完整历史；大仓可设为 50）"
         required: false
@@ -43,6 +48,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: ${{ inputs.fetch_depth }}
+          github-server-url: ${{ inputs.server_url }}
 
       - name: Run secret scan (gitleaks with built-in fallback)
         shell: bash
@@ -91,6 +97,19 @@ jobs:
           fi
 
           echo "::warning::gitleaks binary not found in runner image; falling back to built-in regex secret scanner."
+
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo ">>> python3 not found; using POSIX grep fallback secret scanner."
+            PATTERN='-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----|\b(AKIA|ASIA)[0-9A-Z]{16}\b|\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b|\bglpat-[A-Za-z0-9_-]{20,}\b|\bxox[baprs]-[0-9A-Za-z-]{10,48}\b|\b(sk|rk)_live_[0-9A-Za-z]{20,}\b|\bsk-ant-api03-[A-Za-z0-9_-]{40,}\b|\bLTAI[A-Za-z0-9]{16,24}\b|\bAIza[0-9A-Za-z_-]{35}\b'
+            HITS=$(git ls-files -z | xargs -0 grep -InE "${PATTERN}" 2>/dev/null | grep -vE 'gitleaks:allow|pragma: allowlist secret' | cut -d: -f1,2 || true)
+            if [ -n "${HITS}" ]; then
+              echo "::error::Fallback grep secret scanner matched potential secret(s) at (values redacted):"
+              printf '%s\n' "${HITS}" | head -n 50
+              exit 1
+            fi
+            echo ">>> Fallback grep secret scan passed (0 matches)."
+            exit 0
+          fi
 
           python3 - <<'PYEOF'
           import os
