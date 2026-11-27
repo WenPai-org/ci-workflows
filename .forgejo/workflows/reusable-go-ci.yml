@@ -1,0 +1,95 @@
+# 可复用 Go 项目 CI 工作流（FeiCode Software Factory v2）
+# 调用示例：
+#   jobs:
+#     go-ci:
+#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
+#       with:
+#         build_cmd: "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/app ./cmd/app"
+name: Reusable Go CI
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner 标签（默认 go-1.24，可选 ubuntu-latest）"
+        required: false
+        type: string
+        default: "go-1.24"
+      working_directory:
+        description: "Go 模块所在目录（默认仓库根目录 .）"
+        required: false
+        type: string
+        default: "."
+      go_proxy:
+        description: "GOPROXY 地址（默认国内加速源 https://goproxy.cn,direct）"
+        required: false
+        type: string
+        default: "https://goproxy.cn,direct"
+      test_flags:
+        description: "传递给 go test 的参数（默认 -race ./...）"
+        required: false
+        type: string
+        default: "-race ./..."
+      build_cmd:
+        description: "可选：交叉编译或构建命令（留空跳过）"
+        required: false
+        type: string
+        default: ""
+      enable_cache:
+        description: "是否启用 actions/cache 缓存 Go 模块（默认 true）"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  go-ci:
+    name: Go CI (${{ inputs.runs_on }})
+    runs-on: ${{ inputs.runs_on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+    env:
+      GOPROXY: ${{ inputs.go_proxy }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Go modules
+        if: ${{ inputs.enable_cache }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-
+
+      - name: Verify Go toolchain
+        run: |
+          set -euo pipefail
+          go version
+          go env GOPROXY GOMODCACHE
+
+      - name: Go vet
+        run: |
+          set -euo pipefail
+          go vet ./...
+
+      - name: Go test
+        env:
+          TEST_FLAGS: ${{ inputs.test_flags }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          go test ${TEST_FLAGS}
+
+      - name: Optional cross-compile / build
+        if: ${{ inputs.build_cmd != '' }}
+        env:
+          BUILD_CMD: ${{ inputs.build_cmd }}
+        run: |
+          set -euo pipefail
+          echo ">>> Running build_cmd: ${BUILD_CMD}"
+          bash -euo pipefail -c "${BUILD_CMD}"

@@ -1,90 +1,146 @@
-# CI Workflows 共享模板
+# CI Workflows 共享模板库（FeiCode Software Factory v2）
 
-Forgejo Actions CI/CD 共享 workflow 模板，供 feicode.com 上的仓库使用。
+FeiCode（`https://feicode.com`）统一 Forgejo Actions CI/CD 共享工作流模板库。
 
-## 包含的 Workflow
+自 **v2** 起，推荐所有业务仓直接通过 **`on: workflow_call` 一行 `uses:` 复用**，无需再把数百行 YAML 复制到各仓库，统一享受 Runner 多语言镜像、Actions 缓存、安全加固与发版制品入仓能力。
 
-### 1. gitleaks 密钥泄露扫描 (`gitleaks.yml`)
-- 每次 push 和 PR 自动扫描代码中的 API key、密码、token 等敏感信息
-- 使用 [gitleaks](https://github.com/gitleaks/gitleaks) 引擎
+---
 
-### 2. Trivy 依赖漏洞扫描 (`trivy.yml`)
-- 扫描 `composer.lock`、`package-lock.json` 等锁文件中的已知漏洞
-- 仅报告 HIGH 和 CRITICAL 级别
-- 支持 `.trivyignore` 文件忽略特定 CVE
-- 每周一定时扫描 + lockfile 变更时触发
+## 一、可用 Runner 标签与基础 Action
 
-### 3. WordPress 插件 CI (`wp-plugin-ci.yml`)
-- Push/PR 到 main/master 时自动触发
-- PHP Parallel Lint 语法检查
-- PHPCS 代码规范检查（支持自定义配置）
-- Gitleaks 密钥泄露扫描
+- **基础 Action（已由 `feicode.com/actions/*` 镜像，且 `[actions] DEFAULT_ACTIONS_URL = self`）**：
+  `actions/checkout@v4`、`actions/setup-go`、`actions/setup-node`、`actions/setup-python`、`actions/cache@v4`、`actions/upload-artifact`、`actions/download-artifact`
+- **常用 Runner 标签（`forgejo-runner-01`，4 并发 + Actions Cache）**：
+  `ubuntu-latest`、`ubuntu-22.04`、`php-7.4`、`php-8.3`、`go-1.24`、`node-22`、`python-3.12`
 
-### 4. Go 项目 CI (`go-ci.yml`)
-- Push/PR 到 main/master 时自动触发
-- `go vet` 静态检查
-- `golangci-lint` 代码规范检查（支持自定义配置，未安装时自动安装）
-- `go test -race` 单元测试 + 覆盖率
-- Gitleaks 密钥泄露扫描
+---
 
-### 5. TypeScript/JS 项目 CI (`ts-ci.yml`)
-- Push/PR 到 main/master 时自动触发
-- 自动检测包管理器（npm/yarn/pnpm）
-- `tsc --noEmit` TypeScript 类型检查
-- ESLint 代码规范检查（支持 flat config）
-- Gitleaks 密钥泄露扫描
+## 二、v2 可复用模板一览（推荐 · `workflow_call`）
 
-### 6. WordPress 插件自动发布 (`wp-release.yml`)
-- 打 tag 时自动触发：`v*` 格式
-- 版本一致性校验（tag vs 插件头 vs readme.txt Stable tag）
-- PHP lint 语法检查
-- ZIP 构建 + SHA-256 校验和
-- 智能 Release 创建/更新 + 资产上传（带重试和验证）
-- 可选：部署后 composer repair（需配置 `DEPLOY_*` secrets）
-- 可选：更新 API 元数据验证（需配置 `UPDATE_API_BASE`）
-- 可选：失败时通知 AI CI 助手（需配置 `AI_WEBHOOK_ENDPOINT`）
-- 需要在仓库 Settings → Secrets 中配置 `RELEASE_TOKEN`
+| 模板文件 | 默认 Runner | 核心能力 |
+| --- | --- | --- |
+| `reusable-gitleaks.yml` | `ubuntu-latest` | `gitleaks` 密钥与私钥泄露扫描（镜像无二进制时自动降级为内置正则红线扫描） |
+| `reusable-wp-plugin-ci.yml` | `php-8.3` | 全量 PHP 语法检查、可选 Composer 安装、可选单测命令、`wenpai-admin-lint`、公开文档门禁 |
+| `reusable-wp-plugin-release.yml` | `php-8.3` | 仅限 `v*` Tag 触发（禁止 PR 越权）；版本一致性校验 + PHP lint + 单测 + 白名单 ZIP + SHA-256 + Forgejo Release + Generic Packages 入仓 + 可选 `wenpai-bridge` 签名 Webhook / Mattermost 通知 |
+| `reusable-go-ci.yml` | `go-1.24` | `actions/cache` 缓存模块、`go vet ./...`、`go test -race ./...`、可选跨平台构建 `build_cmd` |
+| `reusable-docker-oci.yml` | `ubuntu-latest` | 多阶段构建 OCI 镜像并推送至 `feicode.com/<owner>/<image>:<tag>`，输出 `image_ref` 与 `digest`（PR 事件自动只构建不推送） |
 
-### 7. 综合安全扫描 (`security-scan.yml`)
-- Push/PR 到 main/master 时自动触发（依赖文件或 Dockerfile 变更）
-- 每周一定时扫描
-- Hadolint Dockerfile 规范检查
-- Composer / npm / Go 依赖安全审计
-- Trivy 容器镜像漏洞扫描
-- 高危漏洞阻断合并
+---
 
-### 8. Renovate 依赖更新 (`renovate.yml`)
-- 每周一、四凌晨 4 点自动运行
-- 自动发现 WenPai-org 下所有仓库
-- 检测 composer.json / package.json / go.mod 依赖更新
-- patch 更新自动合并，minor/major 需审核
-- 安全漏洞更新优先处理
-- 需要配置 Secrets：`FORGEJO_URL`、`RENOVATE_TOKEN`
-- 各仓库可放置 `renovate.json` 自定义策略（参考 `renovate-default.json`）
+## 三、复制即用示例（10 行接入）
 
-### 9. Stale Issue/PR 清理 (`stale-cleanup.yml`)
-- 每周一凌晨 5 点自动运行
-- Issue: 60 天无活动标记 stale，74 天自动关闭
-- PR: 30 天无活动标记 stale，44 天自动关闭
-- 排除 pinned / help-wanted / bug / security 标签
-- 需要配置 Secret：`RELEASE_TOKEN`
+### 1. 密钥泄露扫描（所有仓库必接）
 
-### 10. Auto Label (`auto-label.yml`)
-- PR 创建/更新时自动触发
-- 根据文件类型打标签：php / frontend / go / ci/cd / dependencies / documentation / docker / style
-- 根据 PR 变更量打大小标签：size/S / size/M / size/L / size/XL
-- 标签不存在时自动创建（含预设颜色）
-- 需要配置 Secret：`RELEASE_TOKEN`
+```yaml
+name: Secret Scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
-## 使用方法
-
-将需要的 `.yml` 文件复制到你的仓库的 `.forgejo/workflows/` 目录下即可。
-
-```bash
-# 示例：为你的仓库添加 gitleaks 扫描
-mkdir -p .forgejo/workflows
-curl -o .forgejo/workflows/gitleaks.yml \
-  https://feicode.com/WenPai-org/ci-workflows/raw/branch/main/.forgejo/workflows/gitleaks.yml
-git add .forgejo/workflows/gitleaks.yml
-git commit -m "ci: 添加 gitleaks 密钥泄露扫描"
+jobs:
+  gitleaks:
+    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-gitleaks.yml@main
 ```
+
+### 2. WordPress 插件 CI
+
+```yaml
+name: WP Plugin CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
+    with:
+      runs_on: php-8.3
+      test_command: "php tests/php/run.php"
+      admin_lint: true
+      public_docs_gate: true
+```
+
+### 3. WordPress 插件自动发版（`v*` Tag）
+
+```yaml
+name: WP Plugin Release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-release.yml@main
+    with:
+      test_command: "php tests/php/run.php"
+      publish_package: true
+    secrets:
+      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      BRIDGE_WEBHOOK_URL: ${{ secrets.BRIDGE_WEBHOOK_URL }}
+      BRIDGE_WEBHOOK_SECRET: ${{ secrets.BRIDGE_WEBHOOK_SECRET }}
+      MM_WEBHOOK_URL: ${{ secrets.MM_WEBHOOK_URL }}
+```
+
+> 安全说明：仓库若存在自定义确定性打包脚本（例如 `scripts/build-candidate.py`），可通过 `build_command` 传入，脚本内可直接读取 `$VERSION`、`$SLUG`、`$RELEASE_DIR`、`$ZIP_NAME` 环境变量。`reusable-wp-plugin-release.yml` 强制拦截 `pull_request` 事件，防止 Fork PR 触达发版 Secrets。
+
+### 4. Go 服务 CI 与交叉编译
+
+```yaml
+name: Go CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-go-ci.yml@main
+    with:
+      runs_on: go-1.24
+      test_flags: "-race ./..."
+      build_cmd: "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/app ./cmd/app"
+```
+
+### 5. Docker / OCI 镜像构建与推送
+
+```yaml
+name: OCI Image
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  oci:
+    uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
+    with:
+      dockerfile: Dockerfile
+      context: .
+    secrets:
+      REGISTRY_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+```
+
+---
+
+## 四、历史兼容：复制式模板（v1，保持原样兼容）
+
+以下原有模板继续保留在 `.forgejo/workflows/` 中，确保已复制引用的仓库不受影响：
+
+- `gitleaks.yml`：传统复制式密钥泄露扫描
+- `trivy.yml`：依赖锁文件漏洞扫描（HIGH/CRITICAL）
+- `wp-plugin-ci.yml`：传统复制式 WordPress 插件 CI
+- `wp-release.yml`：传统复制式 WordPress 插件发布流程
+- `go-ci.yml`：传统复制式 Go 项目 CI
+- `ts-ci.yml`：TypeScript/JS 项目 CI
+- `security-scan.yml`：Hadolint + 依赖审计 + Trivy 综合安全扫描
+- `renovate.yml`：每周一、四自动依赖更新（策略参考 `renovate-default.json`）
+- `stale-cleanup.yml`：Issue/PR 过期清理
+- `auto-label.yml`：按变更路径与变更量自动打 PR 标签
+- `infra-monitor.yml` / `test-gz-runner.yml`：基础设施巡检与 Runner 测试模板
