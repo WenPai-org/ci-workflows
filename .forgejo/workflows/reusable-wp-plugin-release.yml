@@ -234,7 +234,8 @@ jobs:
               done
             else
               # 安全默认白名单打包：排除源码管理、CI、测试、开发构建依赖及内部文档
-              python3 - "${STAGE_DIR}" <<'PYEOF'
+              if command -v python3 >/dev/null 2>&1; then
+                python3 - "${STAGE_DIR}" <<'PYEOF'
           import os
           import shutil
           import sys
@@ -270,6 +271,25 @@ jobs:
                   target_path.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(src_path, target_path)
           PYEOF
+              else
+                # 纯 Shell 回退（适配未装 python3 的 forgejo-ci-php 轻量镜像）
+                find . \
+                  \( -name '.git' -o -name '.github' -o -name '.forgejo' -o -name '.vscode' -o -name '.idea' \
+                     -o -name 'node_modules' -o -name 'tests' -o -name 'docs' -o -name 'scripts' -o -name 'dist' -o -name 'build' \
+                     -o -name '.*' \) -prune \
+                  -o -type f \
+                  ! -name '.*' ! -name '*.md' ! -name '*.map' ! -name '*.log' \
+                  ! -name 'composer.json' ! -name 'composer.lock' \
+                  ! -name 'package.json' ! -name 'package-lock.json' ! -name 'pnpm-lock.yaml' ! -name 'yarn.lock' \
+                  ! -name 'phpunit.xml' ! -name 'phpunit.xml.dist' ! -name 'phpcs.xml' ! -name 'phpcs.xml.dist' ! -name 'phpcs*.xml.dist' \
+                  ! -name 'phpstan.neon' ! -name 'phpstan.neon.dist' ! -name 'playwright.config.js' \
+                  ! -name 'Gruntfile.js' ! -name 'webpack.config.js' ! -name 'Makefile' \
+                  -print0 | while IFS= read -r -d '' f; do
+                    rel="${f#./}"
+                    mkdir -p "${STAGE_DIR}/$(dirname "${rel}")"
+                    cp -p "${f}" "${STAGE_DIR}/${rel}"
+                  done
+              fi
             fi
 
             # 优先使用 zip；若镜像无 zip 命令则回退至 Python zipfile
@@ -469,7 +489,7 @@ jobs:
             --arg sha256 "${SHA256}" \
             --arg release_url "${RELEASE_URL}" \
             --arg package_url "${PACKAGE_URL}" \
-            '{event: $event, repository: $repo, slug: $slug, tag: $tag, version: $version, zip_name: $zip_name, sha256: $sha256, release_url: $release_url, package_url: $package_url}')
+            '{event: $event, repository: {name: $slug, full_name: $repo}, slug: $slug, tag: $tag, version: $version, zip_name: $zip_name, sha256: $sha256, release_url: $release_url, package_url: $package_url}')
 
           CURL_HEADERS=(-H "Content-Type: application/json" -H "X-Forgejo-Event: release")
           if [ -n "${BRIDGE_WEBHOOK_SECRET:-}" ]; then
