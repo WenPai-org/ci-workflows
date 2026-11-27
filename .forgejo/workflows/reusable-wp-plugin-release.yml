@@ -1,0 +1,501 @@
+# 可复用 WordPress 插件自动发版工作流（FeiCode Software Factory v2）
+# 触发建议：push tags 'v*'
+# 功能：PHP lint + 可选测试 + 版本校验 + 白名单 ZIP + SHA256 + Forgejo Release + Generic Packages + 可选 wenpai-bridge / Mattermost 通知
+name: Reusable WordPress Plugin Release
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner 标签（默认 php-8.3）"
+        required: false
+        type: string
+        default: "php-8.3"
+      plugin_slug:
+        description: "插件目录/包名 slug（默认取仓库名）"
+        required: false
+        type: string
+        default: ""
+      test_command:
+        description: "可选：打包前运行的测试命令（如 php tests/php/run.php）"
+        required: false
+        type: string
+        default: ""
+      build_command:
+        description: "可选：自定义构建命令，须在 RELEASE_DIR 生成 ZIP_NAME 与 ZIP_NAME.sha256（可用环境变量 VERSION / SLUG / RELEASE_DIR / ZIP_NAME）"
+        required: false
+        type: string
+        default: ""
+      include_paths:
+        description: "可选：内置白名单打包时的顶层路径列表（空格分隔，如 'assets includes languages lib templates readme.txt LICENSE wpslug.php'）；留空则使用安全默认排除规则"
+        required: false
+        type: string
+        default: ""
+      validate_version:
+        description: "是否校验 tag 版本与插件主文件 Version: / readme.txt Stable tag 一致（默认 true）"
+        required: false
+        type: boolean
+        default: true
+      publish_package:
+        description: "是否同步上传 zip + sha256 到 Forgejo Generic Packages（默认 true）"
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: "是否标记为预发布（默认 false；tag 含 -alpha/-beta/-rc 时也会自动标记）"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      RELEASE_TOKEN:
+        description: "可选：用于创建 Release 与上传 Generic Package 的 PAT（不传时回退到 GITHUB_TOKEN）"
+        required: false
+      BRIDGE_WEBHOOK_URL:
+        description: "可选：wenpai-bridge 发版通知 Webhook URL（例如 http://127.0.0.1:8090/webhook/release）"
+        required: false
+      BRIDGE_WEBHOOK_SECRET:
+        description: "可选：wenpai-bridge Webhook HMAC-SHA256 签名密钥"
+        required: false
+      MM_WEBHOOK_URL:
+        description: "可选：Mattermost Incoming Webhook URL，用于发布完成通知"
+        required: false
+    outputs:
+      version:
+        description: "解析出的语义版本号（去掉前缀 v）"
+        value: ${{ jobs.release.outputs.version }}
+      zip_name:
+        description: "构建出的插件压缩包文件名"
+        value: ${{ jobs.release.outputs.zip_name }}
+      sha256:
+        description: "插件压缩包 SHA-256 校验值"
+        value: ${{ jobs.release.outputs.sha256 }}
+      release_url:
+        description: "Forgejo Release 页面 URL"
+        value: ${{ jobs.release.outputs.release_url }}
+      package_url:
+        description: "Forgejo Generic Package 下载 URL"
+        value: ${{ jobs.release.outputs.package_url }}
+
+jobs:
+  release:
+    name: Release WP Plugin
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      zip_name: ${{ steps.package.outputs.zip_name }}
+      sha256: ${{ steps.checksum.outputs.sha256 }}
+      release_url: ${{ steps.publish_release.outputs.release_url }}
+      package_url: ${{ steps.publish_package.outputs.package_url }}
+    steps:
+      - name: Guard against pull_request trigger
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME:-}" = "pull_request_target" ]; then
+            echo "::error::reusable-wp-plugin-release 禁止在 pull_request 事件上运行，以防 Fork PR 越权触达发版凭据。"
+            exit 1
+          fi
+          case "${GITHUB_REF:-}" in
+            refs/tags/v*) ;;
+            *)
+              echo "::error::需要 v* 标签触发发布（当前 GITHUB_REF=${GITHUB_REF:-empty}）。"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          INPUT_SLUG: ${{ inputs.plugin_slug }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          SLUG="${INPUT_SLUG:-${GITHUB_REPOSITORY##*/}}"
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          IS_PRE="${INPUT_PRERELEASE}"
+          if [[ "${VERSION}" == *-* ]]; then
+            IS_PRE="true"
+          fi
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "slug=${SLUG}" >> "${GITHUB_OUTPUT}"
+          echo "owner=${OWNER}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${IS_PRE}" >> "${GITHUB_OUTPUT}"
+          echo ">>> Release metadata: owner=${OWNER} slug=${SLUG} tag=${TAG} version=${VERSION} prerelease=${IS_PRE}"
+
+      - name: Validate version consistency
+        if: ${{ inputs.validate_version }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          MAIN_FILE=$(grep -rl "Plugin Name:" ./*.php 2>/dev/null | head -n 1 || true)
+          if [ -z "${MAIN_FILE}" ]; then
+            echo "::error::未在仓库根目录找到包含 'Plugin Name:' 的插件主文件"
+            exit 1
+          fi
+          HEADER_VERSION=$(grep -i "Version:" "${MAIN_FILE}" | grep -viE "Requires|Tested" | head -n 1 | sed 's/.*Version:[[:space:]]*//;s/[[:space:]]*$//' | tr -d '\r')
+          if [ "${HEADER_VERSION}" != "${VERSION}" ]; then
+            echo "::error::版本不一致：tag=${VERSION}, ${MAIN_FILE} Version=${HEADER_VERSION}"
+            exit 1
+          fi
+          if [ -f "readme.txt" ]; then
+            STABLE_TAG=$(grep -i "^Stable tag:" readme.txt | head -n 1 | sed 's/.*Stable tag:[[:space:]]*//;s/[[:space:]]*$//' | tr -d '\r')
+            if [ -n "${STABLE_TAG}" ] && [ "${STABLE_TAG}" != "${VERSION}" ]; then
+              echo "::error::版本不一致：tag=${VERSION}, readme.txt Stable tag=${STABLE_TAG}"
+              exit 1
+            fi
+          fi
+          echo ">>> Version consistency passed: ${VERSION} (${MAIN_FILE})"
+
+      - name: PHP syntax lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          PHP_COUNT=$(find . -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' | wc -l | tr -d ' ')
+          if [ "${PHP_COUNT}" -gt 0 ]; then
+            find . -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' -print0 \
+              | xargs -0 -n1 php -l >/dev/null
+          fi
+          echo ">>> PHP syntax lint passed (${PHP_COUNT} files)."
+
+      - name: Run pre-release tests
+        if: ${{ inputs.test_command != '' }}
+        shell: bash
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          echo ">>> Running pre-release tests: ${TEST_COMMAND}"
+          bash -euo pipefail -c "${TEST_COMMAND}"
+
+      - name: Generate changelog
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v' | grep -v "^${TAG}$" | head -n 1 || true)
+          if [ -n "${PREV_TAG}" ]; then
+            COMMITS=$(git log "${PREV_TAG}..${TAG}" --no-merges --pretty=format:"- %s (%h)" 2>/dev/null || true)
+          else
+            COMMITS=$(git log --no-merges -n 50 --pretty=format:"- %s (%h)" 2>/dev/null || true)
+          fi
+          printf '%s\n' "${COMMITS}" > /tmp/reusable-changelog.md
+
+      - name: Build whitelist plugin ZIP
+        id: package
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          SLUG: ${{ steps.meta.outputs.slug }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          INCLUDE_PATHS: ${{ inputs.include_paths }}
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="/tmp/feicode-release-${SLUG}"
+          ZIP_NAME="${SLUG}-${VERSION}.zip"
+          rm -rf "${RELEASE_DIR}"
+          mkdir -p "${RELEASE_DIR}"
+
+          if [ -n "${BUILD_COMMAND}" ]; then
+            export VERSION SLUG RELEASE_DIR ZIP_NAME
+            echo ">>> Running custom build_command"
+            bash -euo pipefail -c "${BUILD_COMMAND}"
+          else
+            BUILD_ROOT="/tmp/feicode-build-${SLUG}"
+            STAGE_DIR="${BUILD_ROOT}/${SLUG}"
+            rm -rf "${BUILD_ROOT}"
+            mkdir -p "${STAGE_DIR}"
+
+            if [ -n "${INCLUDE_PATHS}" ]; then
+              for item in ${INCLUDE_PATHS}; do
+                if [ -e "${item}" ]; then
+                  cp -R "${item}" "${STAGE_DIR}/"
+                else
+                  echo "::warning::Configured include_path not found: ${item}"
+                fi
+              done
+            else
+              # 安全默认白名单打包：排除源码管理、CI、测试、开发构建依赖及内部文档
+              python3 - "${STAGE_DIR}" <<'PYEOF'
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
+
+          dest = Path(sys.argv[1])
+          exclude_dirs = {
+              ".git", ".github", ".forgejo", ".vscode", ".idea",
+              "node_modules", "tests", "docs", "scripts", "dist", "build",
+          }
+          exclude_files = {
+              ".gitignore", ".gitattributes", ".editorconfig", ".wp-env.json",
+              ".ci-trigger", "composer.json", "composer.lock",
+              "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+              "phpunit.xml", "phpunit.xml.dist", "phpcs.xml", "phpcs.xml.dist",
+              "phpstan.neon", "phpstan.neon.dist", "playwright.config.js",
+              "Gruntfile.js", "webpack.config.js", "Makefile",
+              "README.md", "CHANGELOG.md", "CLAUDE.md", "AGENTS.md",
+          }
+          for root, dirs, files in os.walk("."):
+              rel_root = Path(root).relative_to(".")
+              dirs[:] = [
+                  d for d in sorted(dirs)
+                  if d not in exclude_dirs and not d.startswith(".")
+              ]
+              for fname in sorted(files):
+                  if fname in exclude_files or fname.startswith(".env") or fname.startswith("."):
+                      continue
+                  if fname.endswith((".md", ".map", ".log")):
+                      continue
+                  src_path = Path(root) / fname
+                  target_path = dest / rel_root / fname
+                  target_path.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src_path, target_path)
+          PYEOF
+            fi
+
+            # 优先使用 zip；若镜像无 zip 命令则回退至 Python zipfile
+            if command -v zip >/dev/null 2>&1; then
+              (cd "${BUILD_ROOT}" && zip -qr "${RELEASE_DIR}/${ZIP_NAME}" "${SLUG}/")
+            else
+              python3 - "${BUILD_ROOT}" "${SLUG}" "${RELEASE_DIR}/${ZIP_NAME}" <<'PYEOF'
+          import os, sys, zipfile
+          root, slug, out_zip = sys.argv[1], sys.argv[2], sys.argv[3]
+          with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+              base = os.path.join(root, slug)
+              for dirpath, dirnames, filenames in os.walk(base):
+                  dirnames.sort()
+                  for fn in sorted(filenames):
+                      full = os.path.join(dirpath, fn)
+                      arc = os.path.relpath(full, root)
+                      zf.write(full, arc)
+          PYEOF
+            fi
+          fi
+
+          if [ ! -f "${RELEASE_DIR}/${ZIP_NAME}" ]; then
+            echo "::error::Expected archive not found: ${RELEASE_DIR}/${ZIP_NAME}"
+            exit 1
+          fi
+
+          echo "release_dir=${RELEASE_DIR}" >> "${GITHUB_OUTPUT}"
+          echo "zip_name=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "zip_path=${RELEASE_DIR}/${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+          echo ">>> Built archive: ${RELEASE_DIR}/${ZIP_NAME} ($(du -h "${RELEASE_DIR}/${ZIP_NAME}" | cut -f1))"
+
+      - name: Generate and verify SHA-256
+        id: checksum
+        shell: bash
+        env:
+          RELEASE_DIR: ${{ steps.package.outputs.release_dir }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          cd "${RELEASE_DIR}"
+          if [ ! -f "${ZIP_NAME}.sha256" ]; then
+            sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
+          fi
+          sha256sum -c "${ZIP_NAME}.sha256"
+          SHA256=$(awk '{print $1}' "${ZIP_NAME}.sha256")
+          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+          echo "sha256_file=${RELEASE_DIR}/${ZIP_NAME}.sha256" >> "${GITHUB_OUTPUT}"
+          echo ">>> SHA-256: ${SHA256}"
+
+      - name: Publish Forgejo Release and assets
+        id: publish_release
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SLUG: ${{ steps.meta.outputs.slug }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          RELEASE_DIR: ${{ steps.package.outputs.release_dir }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN="${RELEASE_TOKEN:-${FALLBACK_TOKEN:-}}"
+          if [ -z "${AUTH_TOKEN}" ]; then
+            echo "::error::Missing RELEASE_TOKEN and GITHUB_TOKEN"
+            exit 1
+          fi
+
+          API_URL="${GITHUB_SERVER_URL%/}/api/v1/repos/${GITHUB_REPOSITORY}"
+          AUTH_HEADER="Authorization: token ${AUTH_TOKEN}"
+
+          {
+            echo "## ${SLUG} ${TAG}"
+            echo ""
+            if [ -s /tmp/reusable-changelog.md ]; then
+              echo "### 变更摘要"
+              echo ""
+              cat /tmp/reusable-changelog.md
+              echo ""
+            fi
+            echo "### 校验和（SHA-256）"
+            echo ""
+            echo "| 文件 | SHA-256 |"
+            echo "|------|---------|"
+            echo "| \`${ZIP_NAME}\` | \`${SHA256}\` |"
+          } > /tmp/reusable-release-notes.md
+
+          RELEASE_NOTES=$(cat /tmp/reusable-release-notes.md)
+          PAYLOAD=$(jq -n \
+            --arg tag "${TAG}" \
+            --arg name "${TAG}" \
+            --arg body "${RELEASE_NOTES}" \
+            --argjson pre "${PRERELEASE}" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $pre}')
+
+          STATUS=$(curl --noproxy '*' -sS -o /tmp/release.json -w "%{http_code}" \
+            -H "${AUTH_HEADER}" "${API_URL}/releases/tags/${TAG}")
+
+          if [ "${STATUS}" = "200" ]; then
+            RELEASE_ID=$(jq -r '.id' /tmp/release.json)
+            curl --noproxy '*' -sS -f -X PATCH \
+              -H "${AUTH_HEADER}" -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" "${API_URL}/releases/${RELEASE_ID}" > /tmp/release.json
+          elif [ "${STATUS}" = "404" ]; then
+            curl --noproxy '*' -sS -f -X POST \
+              -H "${AUTH_HEADER}" -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" "${API_URL}/releases" > /tmp/release.json
+          else
+            echo "::error::Query release failed (HTTP ${STATUS})"
+            cat /tmp/release.json
+            exit 1
+          fi
+
+          RELEASE_ID=$(jq -r '.id' /tmp/release.json)
+          for FILENAME in "${ZIP_NAME}" "${ZIP_NAME}.sha256"; do
+            FILE="${RELEASE_DIR}/${FILENAME}"
+            OLD_ID=$(jq -r --arg n "${FILENAME}" '.assets[]? | select(.name == $n) | .id' /tmp/release.json | head -n 1 || true)
+            if [ -n "${OLD_ID}" ] && [ "${OLD_ID}" != "null" ]; then
+              curl --noproxy '*' -sS -f -X DELETE -H "${AUTH_HEADER}" \
+                "${API_URL}/releases/${RELEASE_ID}/assets/${OLD_ID}" >/dev/null
+            fi
+            ENC=$(printf '%s' "${FILENAME}" | jq -sRr @uri)
+            curl --noproxy '*' -sS -f --retry 3 --retry-delay 2 \
+              -X POST -H "${AUTH_HEADER}" \
+              -F "attachment=@${FILE}" \
+              "${API_URL}/releases/${RELEASE_ID}/assets?name=${ENC}" >/dev/null
+          done
+
+          RELEASE_URL="${GITHUB_SERVER_URL%/}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          echo "release_url=${RELEASE_URL}" >> "${GITHUB_OUTPUT}"
+          echo ">>> Published Release: ${RELEASE_URL}"
+
+      - name: Upload to Forgejo Generic Packages
+        id: publish_package
+        if: ${{ inputs.publish_package }}
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          OWNER: ${{ steps.meta.outputs.owner }}
+          SLUG: ${{ steps.meta.outputs.slug }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_DIR: ${{ steps.package.outputs.release_dir }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          AUTH_TOKEN="${RELEASE_TOKEN:-${FALLBACK_TOKEN:-}}"
+          BASE="${GITHUB_SERVER_URL%/}/api/packages/${OWNER}/generic/${SLUG}/${VERSION}"
+
+          for FILENAME in "${ZIP_NAME}" "${ZIP_NAME}.sha256"; do
+            FILE="${RELEASE_DIR}/${FILENAME}"
+            # 允许同版本覆盖：若已存在则先删后传
+            curl --noproxy '*' -sS -o /dev/null -X DELETE \
+              -H "Authorization: token ${AUTH_TOKEN}" \
+              "${BASE}/${FILENAME}" || true
+
+            HTTP_CODE=$(curl --noproxy '*' -sS -o /tmp/pkg-upload.out -w "%{http_code}" \
+              -X PUT -H "Authorization: token ${AUTH_TOKEN}" \
+              --upload-file "${FILE}" \
+              "${BASE}/${FILENAME}")
+            if [ "${HTTP_CODE}" != "201" ] && [ "${HTTP_CODE}" != "200" ]; then
+              echo "::error::Generic Package upload failed for ${FILENAME} (HTTP ${HTTP_CODE})"
+              cat /tmp/pkg-upload.out
+              exit 1
+            fi
+            echo ">>> Uploaded Generic Package: ${BASE}/${FILENAME} (HTTP ${HTTP_CODE})"
+          done
+
+          echo "package_url=${BASE}/${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Trigger signed wenpai-bridge webhook (optional)
+        if: ${{ secrets.BRIDGE_WEBHOOK_URL != '' }}
+        shell: bash
+        env:
+          BRIDGE_WEBHOOK_URL: ${{ secrets.BRIDGE_WEBHOOK_URL }}
+          BRIDGE_WEBHOOK_SECRET: ${{ secrets.BRIDGE_WEBHOOK_SECRET }}
+          SLUG: ${{ steps.meta.outputs.slug }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP_NAME: ${{ steps.package.outputs.zip_name }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+          RELEASE_URL: ${{ steps.publish_release.outputs.release_url }}
+          PACKAGE_URL: ${{ steps.publish_package.outputs.package_url }}
+        run: |
+          set -euo pipefail
+          PAYLOAD=$(jq -n \
+            --arg event "release" \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg slug "${SLUG}" \
+            --arg tag "${TAG}" \
+            --arg version "${VERSION}" \
+            --arg zip_name "${ZIP_NAME}" \
+            --arg sha256 "${SHA256}" \
+            --arg release_url "${RELEASE_URL}" \
+            --arg package_url "${PACKAGE_URL}" \
+            '{event: $event, repository: $repo, slug: $slug, tag: $tag, version: $version, zip_name: $zip_name, sha256: $sha256, release_url: $release_url, package_url: $package_url}')
+
+          CURL_HEADERS=(-H "Content-Type: application/json" -H "X-Forgejo-Event: release")
+          if [ -n "${BRIDGE_WEBHOOK_SECRET:-}" ]; then
+            SIG=$(printf '%s' "${PAYLOAD}" | openssl dgst -sha256 -hmac "${BRIDGE_WEBHOOK_SECRET}" | awk '{print $NF}')
+            CURL_HEADERS+=(-H "X-Hub-Signature-256: sha256=${SIG}" -H "X-Forgejo-Signature: ${SIG}")
+          fi
+
+          HTTP_CODE=$(curl --noproxy '*' -sS --max-time 30 -o /tmp/bridge-resp.txt -w "%{http_code}" \
+            -X POST "${CURL_HEADERS[@]}" -d "${PAYLOAD}" "${BRIDGE_WEBHOOK_URL}")
+          if [[ "${HTTP_CODE}" != 2* ]]; then
+            echo "::error::wenpai-bridge webhook returned HTTP ${HTTP_CODE}"
+            head -c 300 /tmp/bridge-resp.txt || true
+            exit 1
+          fi
+          echo ">>> wenpai-bridge webhook accepted (HTTP ${HTTP_CODE})"
+
+      - name: Send Mattermost release notification (optional)
+        if: ${{ secrets.MM_WEBHOOK_URL != '' }}
+        shell: bash
+        env:
+          MM_WEBHOOK_URL: ${{ secrets.MM_WEBHOOK_URL }}
+          SLUG: ${{ steps.meta.outputs.slug }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+          RELEASE_URL: ${{ steps.publish_release.outputs.release_url }}
+          PACKAGE_URL: ${{ steps.publish_package.outputs.package_url }}
+        run: |
+          set -euo pipefail
+          TEXT=$(printf '**[FeiCode 发版]** `%s` `%s` 已发布\n- Release: %s\n- Package: %s\n- SHA-256: `%s`' \
+            "${GITHUB_REPOSITORY}" "${TAG}" "${RELEASE_URL}" "${PACKAGE_URL:-未启用}" "${SHA256}")
+          PAYLOAD=$(jq -n --arg text "${TEXT}" '{text: $text}')
+          HTTP_CODE=$(curl --noproxy '*' -sS --max-time 20 -o /dev/null -w "%{http_code}" \
+            -X POST -H "Content-Type: application/json" -d "${PAYLOAD}" "${MM_WEBHOOK_URL}")
+          if [[ "${HTTP_CODE}" != 2* ]]; then
+            echo "::warning::Mattermost webhook returned HTTP ${HTTP_CODE} (non-fatal)"
+          else
+            echo ">>> Mattermost release notification sent (HTTP ${HTTP_CODE})"
+          fi

@@ -1,0 +1,228 @@
+# 可复用 OCI 容器镜像构建与推送工作流（FeiCode Software Factory v2）
+# 默认推送至 feicode.com/<owner>/<image>:<tag> 并输出 SHA-256 Digest
+# 调用示例：
+#   jobs:
+#     docker:
+#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-docker-oci.yml@main
+#       with:
+#         dockerfile: Dockerfile
+#       secrets:
+#         REGISTRY_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+name: Reusable Docker OCI Build & Push
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner 标签（默认 ubuntu-latest）"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+      registry:
+        description: "OCI 镜像仓库域名（默认 feicode.com）"
+        required: false
+        type: string
+        default: "feicode.com"
+      image_name:
+        description: "镜像路径 <owner>/<image>（默认自动取小写仓库全名）"
+        required: false
+        type: string
+        default: ""
+      dockerfile:
+        description: "Dockerfile 路径（默认 Dockerfile）"
+        required: false
+        type: string
+        default: "Dockerfile"
+      context:
+        description: "构建上下文目录（默认 .）"
+        required: false
+        type: string
+        default: "."
+      target:
+        description: "可选：多阶段构建目标阶段名（--target）"
+        required: false
+        type: string
+        default: ""
+      tags:
+        description: "可选：逗号分隔的镜像标签列表；留空则自动按 Tag(v*) 或 sha-<short> + latest 生成"
+        required: false
+        type: string
+        default: ""
+      build_args:
+        description: "可选：换行分隔的构建参数 KEY=VALUE"
+        required: false
+        type: string
+        default: ""
+      push:
+        description: "是否推送至仓库（默认 true；pull_request 事件强制为 false 仅做构建验证）"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      REGISTRY_USERNAME:
+        description: "可选：登录用户名（默认 github.actor）"
+        required: false
+      REGISTRY_TOKEN:
+        description: "可选：具备 packages:write 权限的 PAT（不传时回退到 GITHUB_TOKEN）"
+        required: false
+    outputs:
+      image_ref:
+        description: "主镜像引用（含标签）"
+        value: ${{ jobs.oci.outputs.image_ref }}
+      digest:
+        description: "镜像 SHA-256 Digest（sha256:...）"
+        value: ${{ jobs.oci.outputs.digest }}
+
+jobs:
+  oci:
+    name: Build & Push OCI Image
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      image_ref: ${{ steps.build.outputs.image_ref }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve OCI image metadata
+        id: meta
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          INPUT_TAGS: ${{ inputs.tags }}
+          INPUT_PUSH: ${{ inputs.push }}
+        run: |
+          set -euo pipefail
+          REPO_PATH="${IMAGE_NAME:-${GITHUB_REPOSITORY}}"
+          REPO_PATH=$(printf '%s' "${REPO_PATH}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          SHOULD_PUSH="${INPUT_PUSH}"
+          if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME:-}" = "pull_request_target" ]; then
+            SHOULD_PUSH="false"
+            echo ">>> Pull request event detected: disabling registry push (build-only verification)."
+          fi
+
+          if [ -n "${INPUT_TAGS}" ]; then
+            TAGS_CSV="${INPUT_TAGS}"
+          elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF#refs/tags/}"
+            TAGS_CSV="${RAW_TAG},sha-${SHORT_SHA}"
+          else
+            BRANCH="${GITHUB_REF_NAME:-main}"
+            SAFE_BRANCH=$(printf '%s' "${BRANCH}" | tr '/:' '--' | tr -cd 'a-zA-Z0-9._-')
+            if [ "${BRANCH}" = "main" ] || [ "${BRANCH}" = "master" ]; then
+              TAGS_CSV="latest,sha-${SHORT_SHA}"
+            else
+              TAGS_CSV="${SAFE_BRANCH},sha-${SHORT_SHA}"
+            fi
+          fi
+
+          echo "repo_ref=${REGISTRY%/}/${REPO_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "tags_csv=${TAGS_CSV}" >> "${GITHUB_OUTPUT}"
+          echo "should_push=${SHOULD_PUSH}" >> "${GITHUB_OUTPUT}"
+          echo ">>> Target OCI image: ${REGISTRY%/}/${REPO_PATH} tags=[${TAGS_CSV}] push=${SHOULD_PUSH}"
+
+      - name: Build and push multi-stage OCI image
+        id: build
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REPO_REF: ${{ steps.meta.outputs.repo_ref }}
+          TAGS_CSV: ${{ steps.meta.outputs.tags_csv }}
+          SHOULD_PUSH: ${{ steps.meta.outputs.should_push }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.context }}
+          TARGET: ${{ inputs.target }}
+          BUILD_ARGS: ${{ inputs.build_args }}
+          REG_USER: ${{ secrets.REGISTRY_USERNAME }}
+          REG_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ENGINE=""
+          if command -v docker >/dev/null 2>&1; then
+            ENGINE="docker"
+          elif command -v podman >/dev/null 2>&1; then
+            ENGINE="podman"
+          else
+            echo "::error::Neither docker nor podman is available in the runner environment."
+            exit 1
+          fi
+          echo ">>> Using container engine: ${ENGINE}"
+
+          IFS=',' read -r -a TAG_LIST <<< "${TAGS_CSV}"
+          BUILD_CMD=("${ENGINE}" build -f "${DOCKERFILE}")
+          if [ -n "${TARGET}" ]; then
+            BUILD_CMD+=(--target "${TARGET}")
+          fi
+
+          if [ -n "${BUILD_ARGS}" ]; then
+            while IFS= read -r arg_line || [ -n "${arg_line:-}" ]; do
+              arg_line=$(printf '%s' "${arg_line}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              [ -z "${arg_line}" ] && continue
+              BUILD_CMD+=(--build-arg "${arg_line}")
+            done <<< "${BUILD_ARGS}"
+          fi
+
+          PRIMARY_REF=""
+          FULL_REFS=()
+          for t in "${TAG_LIST[@]}"; do
+            t=$(printf '%s' "${t}" | tr -d '[:space:]')
+            [ -z "${t}" ] && continue
+            ref="${REPO_REF}:${t}"
+            FULL_REFS+=("${ref}")
+            BUILD_CMD+=(-t "${ref}")
+            if [ -z "${PRIMARY_REF}" ]; then
+              PRIMARY_REF="${ref}"
+            fi
+          done
+
+          if [ -z "${PRIMARY_REF}" ]; then
+            echo "::error::No valid OCI image tags resolved."
+            exit 1
+          fi
+
+          BUILD_CMD+=("${CONTEXT}")
+          echo ">>> Building ${PRIMARY_REF} (dockerfile=${DOCKERFILE}, context=${CONTEXT})"
+          "${BUILD_CMD[@]}"
+
+          DIGEST=""
+          if [ "${SHOULD_PUSH}" = "true" ]; then
+            LOGIN_USER="${REG_USER:-${GITHUB_ACTOR}}"
+            LOGIN_PASS="${REG_TOKEN:-${FALLBACK_TOKEN:-}}"
+            if [ -z "${LOGIN_PASS}" ]; then
+              echo "::error::Missing REGISTRY_TOKEN and GITHUB_TOKEN for registry login"
+              exit 1
+            fi
+            printf '%s' "${LOGIN_PASS}" | "${ENGINE}" login "${REGISTRY}" -u "${LOGIN_USER}" --password-stdin
+
+            for ref in "${FULL_REFS[@]}"; do
+              echo ">>> Pushing ${ref}"
+              if [ "${ENGINE}" = "podman" ]; then
+                "${ENGINE}" push --digestfile /tmp/oci-digest.txt "${ref}"
+                if [ -z "${DIGEST}" ] && [ -s /tmp/oci-digest.txt ]; then
+                  DIGEST=$(tr -d '\r\n' < /tmp/oci-digest.txt)
+                fi
+              else
+                PUSH_OUT=$("${ENGINE}" push "${ref}")
+                printf '%s\n' "${PUSH_OUT}"
+                if [ -z "${DIGEST}" ]; then
+                  DIGEST=$(printf '%s\n' "${PUSH_OUT}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n 1 || true)
+                fi
+              fi
+            done
+
+            if [ -z "${DIGEST}" ]; then
+              DIGEST=$("${ENGINE}" inspect --format '{{index .RepoDigests 0}}' "${PRIMARY_REF}" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' || true)
+            fi
+          else
+            DIGEST=$("${ENGINE}" inspect --format '{{.Id}}' "${PRIMARY_REF}" 2>/dev/null | grep -oE 'sha256:[0-9a-f]{64}' || true)
+          fi
+
+          echo "image_ref=${PRIMARY_REF}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo ">>> Image: ${PRIMARY_REF}"
+          echo ">>> Digest: ${DIGEST}"

@@ -1,0 +1,130 @@
+# 可复用 WordPress 插件 CI 工作流（FeiCode Software Factory v2）
+# 调用示例：
+#   jobs:
+#     wp-ci:
+#       uses: https://feicode.com/WenPai-org/ci-workflows/.forgejo/workflows/reusable-wp-plugin-ci.yml@main
+#       with:
+#         test_command: "php tests/php/run.php"
+#         admin_lint: true
+name: Reusable WordPress Plugin CI
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        description: "Runner 标签（默认 php-8.3，可选 php-7.4 / ubuntu-latest）"
+        required: false
+        type: string
+        default: "php-8.3"
+      working_directory:
+        description: "插件根目录相对路径（默认仓库根目录 .）"
+        required: false
+        type: string
+        default: "."
+      composer_install:
+        description: "测试前是否执行 composer install（需存在 composer.json）"
+        required: false
+        type: boolean
+        default: false
+      test_command:
+        description: "可选：自定义测试命令（如 php tests/php/run.php 或 composer test）"
+        required: false
+        type: string
+        default: ""
+      admin_lint:
+        description: "可选：是否运行 wenpai-admin-lint 后台 UI 规范巡检"
+        required: false
+        type: boolean
+        default: false
+      admin_lint_script:
+        description: "wenpai-admin-lint 脚本路径（默认 lib/wenpai-admin-ui/scripts/wenpai-admin-lint.py）"
+        required: false
+        type: string
+        default: "lib/wenpai-admin-ui/scripts/wenpai-admin-lint.py"
+      public_docs_gate:
+        description: "可选：是否运行 scripts/public-docs-gate.py 公开仓库文档门禁"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  wp-plugin-ci:
+    name: WP Plugin CI (${{ inputs.runs_on }})
+    runs-on: ${{ inputs.runs_on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print PHP runtime
+        run: |
+          set -euo pipefail
+          php -v
+
+      - name: PHP syntax lint
+        run: |
+          set -euo pipefail
+          PHP_COUNT=$(find . -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' | wc -l | tr -d ' ')
+          echo ">>> Checking PHP syntax across ${PHP_COUNT} file(s)"
+          if [ "${PHP_COUNT}" -eq 0 ]; then
+            echo "::warning::No PHP files found to lint."
+            exit 0
+          fi
+          find . -name '*.php' -not -path './vendor/*' -not -path './node_modules/*' -print0 \
+            | xargs -0 -n1 php -l >/dev/null
+          echo ">>> PHP syntax lint passed (${PHP_COUNT} files)."
+
+      - name: Optional public docs gate
+        if: ${{ inputs.public_docs_gate }}
+        run: |
+          set -euo pipefail
+          if [ -f "scripts/public-docs-gate.py" ]; then
+            python3 scripts/public-docs-gate.py --cwd .
+          else
+            echo "::warning::scripts/public-docs-gate.py not found, skipping public_docs_gate."
+          fi
+
+      - name: Optional Composer install
+        if: ${{ inputs.composer_install }}
+        env:
+          COMPOSER_MAX_PARALLEL_HTTP: "1"
+        run: |
+          set -euo pipefail
+          if [ ! -f "composer.json" ]; then
+            echo "::warning::composer.json not found, skipping composer install."
+            exit 0
+          fi
+          if ! command -v composer >/dev/null 2>&1; then
+            echo "::error::composer binary not found in runner image"
+            exit 1
+          fi
+          composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Optional plugin tests
+        if: ${{ inputs.test_command != '' }}
+        env:
+          TEST_COMMAND: ${{ inputs.test_command }}
+        run: |
+          set -euo pipefail
+          echo ">>> Running test command: ${TEST_COMMAND}"
+          bash -euo pipefail -c "${TEST_COMMAND}"
+
+      - name: Optional wenpai-admin-lint
+        if: ${{ inputs.admin_lint }}
+        env:
+          ADMIN_LINT_SCRIPT: ${{ inputs.admin_lint_script }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "${ADMIN_LINT_SCRIPT}" ]; then
+            echo "::error::admin_lint enabled but script not found: ${ADMIN_LINT_SCRIPT}"
+            exit 1
+          fi
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "::error::python3 not found in runner image for wenpai-admin-lint"
+            exit 1
+          fi
+          echo ">>> Running wenpai-admin-lint: ${ADMIN_LINT_SCRIPT}"
+          python3 "${ADMIN_LINT_SCRIPT}" .
