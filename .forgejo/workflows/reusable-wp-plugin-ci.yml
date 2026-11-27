@@ -126,5 +126,5 @@ jobs:
             echo "::error::python3 not found in runner image for wenpai-admin-lint"
             exit 1
           fi
-          echo ">>> Running wenpai-admin-lint: ${ADMIN_LINT_SCRIPT}"
-          python3 "${ADMIN_LINT_SCRIPT}" .
+          echo ">>> Running wenpai-admin-lint: ${ADMIN_LINT_SCRIPT} --plugin-root ."
+          python3 "${ADMIN_LINT_SCRIPT}" --plugin-root .
